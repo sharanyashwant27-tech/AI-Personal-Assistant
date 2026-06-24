@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", "/workspace")).resolve()
+_DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", str(_DEFAULT_ROOT))).resolve()
 
 
 def resolve_workspace_path(relative_path: str) -> Path:

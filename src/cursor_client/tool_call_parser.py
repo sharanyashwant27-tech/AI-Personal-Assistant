@@ -30,6 +30,8 @@ _TOOL_ALIASES: dict[str, str] = {
     "read_file": "read_file",
     "grep": "ripgrep_search",
     "grep_search": "ripgrep_search",
+    "ripgrep_search": "ripgrep_search",
+    "Grep": "ripgrep_search",
     "run_terminal_cmd": "run_terminal_command",
     "run_terminal_command": "run_terminal_command",
     "edit_file": "edit_file",
@@ -81,6 +83,14 @@ def parse_redacted_tool_calls(text: str) -> list[dict[str, Any]]:
     return calls
 
 
+def normalize_tool_params(name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of tool params normalized for local execution."""
+    normalized = dict(params)
+    canonical = _TOOL_ALIASES.get(name.lower(), name.lower())
+    _normalize_params(canonical, normalized)
+    return normalized
+
+
 def _normalize_params(name: str, params: dict[str, Any]) -> None:
     if name == "glob_file_search":
         pattern = params.pop("glob_pattern", params.pop("pattern", "*"))
@@ -104,6 +114,45 @@ def _normalize_params(name: str, params: dict[str, Any]) -> None:
                 break
     elif name == "file_search":
         params.pop("explanation", None)
+    elif name in {"ripgrep_search", "grep_search", "grep"}:
+        params.pop("explanation", None)
+        _extract_pattern(params)
+        for key in ("path", "target_directory", "include_pattern"):
+            if key in params and "search_path" not in params:
+                params["search_path"] = params.pop(key)
+                break
+    elif name in {"run_terminal_command", "run_terminal_cmd"}:
+        params.pop("explanation", None)
+        for key in ("cmd", "terminal_command"):
+            if key in params and "command" not in params:
+                params["command"] = params.pop(key)
+                break
+        cwd = params.get("cwd") or params.get("working_directory")
+        if cwd is not None and not str(cwd).strip():
+            params.pop("cwd", None)
+            params.pop("working_directory", None)
+
+
+def _extract_pattern(params: dict[str, Any]) -> None:
+    """Map Cursor grep param shapes to vendor executor `pattern`."""
+    info = params.get("pattern_info")
+    if isinstance(info, dict) and info.get("pattern"):
+        params.setdefault("pattern", str(info["pattern"]))
+    elif isinstance(info, str) and info.strip():
+        try:
+            parsed = json.loads(info)
+            if isinstance(parsed, dict) and parsed.get("pattern"):
+                params.setdefault("pattern", str(parsed["pattern"]))
+        except json.JSONDecodeError:
+            params.setdefault("pattern", info.strip())
+
+    for key in ("query", "search_query", "search", "regex", "pattern"):
+        value = params.get(key)
+        if value is not None and str(value).strip() and not params.get("pattern"):
+            params["pattern"] = str(value).strip()
+            if key != "pattern":
+                params.pop(key, None)
+            break
 
 
 def strip_tool_markup(text: str) -> str:

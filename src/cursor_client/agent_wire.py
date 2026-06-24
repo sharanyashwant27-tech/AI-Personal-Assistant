@@ -19,6 +19,7 @@ from cursor_client.tool_call_parser import (
     parse_redacted_tool_calls,
     strip_tool_markup,
 )
+from cursor_client.workspace_executor import WorkspaceToolExecutor
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -58,6 +59,7 @@ class CursorWireAgent:
         from cursor_streaming_decoder import CursorStreamDecoder  # noqa: WPS433
 
         client = CursorAgentClient(workspace_root=str(self._workspace))
+        client.tool_executor = WorkspaceToolExecutor(self._workspace)
         client.ghost_mode = self._ghost_mode
         if self._backend_url:
             client.base_url = self._backend_url.rstrip("/")
@@ -213,6 +215,7 @@ def _build_name_to_enum(ClientSideToolV2) -> dict[str, int]:
         "read_file": ClientSideToolV2.READ_FILE,
         "ripgrep_search": ClientSideToolV2.RIPGREP_SEARCH,
         "grep_search": ClientSideToolV2.RIPGREP_SEARCH,
+        "grep": ClientSideToolV2.RIPGREP_SEARCH,
         "run_terminal_command": ClientSideToolV2.RUN_TERMINAL_COMMAND_V2,
         "edit_file": ClientSideToolV2.EDIT_FILE,
         "file_search": ClientSideToolV2.FILE_SEARCH,
@@ -232,6 +235,10 @@ def _dict_to_tool_call(data: dict[str, Any], name_to_enum: dict[str, int]):
             params = json.loads(raw_args)
         except json.JSONDecodeError:
             params = {}
+    from cursor_client.tool_call_parser import normalize_tool_params
+
+    if isinstance(params, dict):
+        params = normalize_tool_params(name, params)
     tool_id = int(data.get("tool") or 0) or name_to_enum.get(name, 0)
     return ToolCall(
         tool=int(tool_id),
@@ -293,6 +300,11 @@ def _tool_call_from_debug_str(text: str, name_to_enum: dict[str, int]):
         params = json.loads(raw_args.replace("\\\"", '"').replace("\\n", "\n"))
     except json.JSONDecodeError:
         params = {}
+
+    if isinstance(params, dict):
+        from cursor_client.tool_call_parser import normalize_tool_params  # noqa: WPS433
+
+        params = normalize_tool_params(name or "unknown", params)
 
     if not name and not tool_num:
         return None
