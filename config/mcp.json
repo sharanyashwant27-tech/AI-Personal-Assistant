@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "agent-tools": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "docker/docker-compose.yml",
+        "run",
+        "--rm",
+        "-i",
+        "-e",
+        "MCP_TRANSPORT=stdio",
+        "mcp-agent-tools"
+      ]
+    }
+  }
+}

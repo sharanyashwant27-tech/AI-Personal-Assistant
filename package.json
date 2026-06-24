@@ -1,0 +1,9 @@
+{
+  "name": "ai-personal-assistant",
+  "private": true,
+  "scripts": {
+    "api": "venv\\Scripts\\python.exe src\\main.py serve",
+    "ui": "npm run dev --prefix apps/plane",
+    "plane": "powershell -File scripts/start_plane.ps1"
+  }
+}

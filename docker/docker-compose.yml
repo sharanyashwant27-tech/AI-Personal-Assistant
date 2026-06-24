@@ -1,0 +1,16 @@
+services:
+  mcp-agent-tools:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp
+    container_name: ai-assistant-mcp
+    ports:
+      - "${MCP_PORT:-8765}:8765"
+    volumes:
+      - ..:/workspace
+    environment:
+      WORKSPACE_ROOT: /workspace
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8765
+      MCP_TRANSPORT: streamable-http
+    restart: unless-stopped

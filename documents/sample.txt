@@ -1,0 +1,15 @@
+AI Personal Assistant — Project Overview
+
+This assistant uses Retrieval-Augmented Generation (RAG) to answer questions
+grounded in your own documents.
+
+How RAG works:
+1. Documents are loaded from the documents/ folder.
+2. Text is split into chunks and converted to embeddings.
+3. Embeddings are stored in a local vector database (ChromaDB).
+4. When you ask a question, the most relevant chunks are retrieved.
+5. Those chunks are injected into the prompt so the LLM can cite your data.
+
+Supported file types: .txt, .md, .pdf
+
+To index documents, run the "index" command in the chat CLI.

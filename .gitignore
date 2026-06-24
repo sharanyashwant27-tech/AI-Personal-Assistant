@@ -1,0 +1,22 @@
+.env
+.env.local
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime data
+data/vector_db/
+data/conversation.json
+data/agent_memory.json
+data/mcp_test_output.txt
+
+# Node / frontend build
+node_modules/
+apps/plane/node_modules/
+apps/plane/dist/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.cursor/
