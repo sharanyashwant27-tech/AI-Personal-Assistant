@@ -20,3 +20,6 @@ apps/plane/dist/
 # IDE
 .vscode/
 .cursor/
+
+# Java build output
+*.class
