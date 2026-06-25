@@ -14,7 +14,12 @@ from typing import Any
 import httpx
 
 from cursor_client._vendor import ensure_vendor_path
-from cursor_client.decoder_utils import _unescape_thinking_chunk
+from cursor_client.decoder_utils import (
+    extract_wire_answer,
+    merge_thinking_chunks,
+    _looks_like_reasoning,
+    _looks_like_tool_payload,
+)
 from cursor_client.tool_call_parser import (
     parse_redacted_tool_calls,
     strip_tool_markup,
@@ -85,6 +90,9 @@ class CursorWireAgent:
 
         self._emit(on_event, "agent_start", {"mode": "wire", "model": self._model})
 
+        last_prose_answer = ""
+        tools_ran = False
+        empty_rounds = 0
         async with httpx.AsyncClient(http2=True, timeout=120.0) as http:
             for iteration in range(1, self._max_iterations + 1):
                 self._emit(on_event, "thinking", {"iteration": iteration})
@@ -140,7 +148,7 @@ class CursorWireAgent:
                                     tool_calls.append(tc)
 
                 thinking_parts = [t for k, t in stream_messages if k == "thinking" and t]
-                thinking_text = _merge_thinking_text(thinking_parts)
+                thinking_text = merge_thinking_chunks(thinking_parts)
 
                 if not tool_calls:
                     for tc_dict in parse_redacted_tool_calls(thinking_text):
@@ -150,9 +158,16 @@ class CursorWireAgent:
                             tool_calls.append(tc)
 
                 if not tool_calls:
-                    answer = _final_from_thinking(thinking_text)
-                    answer = strip_tool_markup(answer)
+                    answer = extract_wire_answer(stream_messages)
+                    if not answer:
+                        answer = strip_tool_markup(thinking_text).strip()
+                        if answer and (
+                            answer.startswith("{") or _looks_like_reasoning(answer)
+                        ):
+                            answer = ""
+
                     if answer:
+                        last_prose_answer = answer
                         self._emit(
                             on_event,
                             "assistant",
@@ -160,7 +175,23 @@ class CursorWireAgent:
                         )
                         self._emit(on_event, "final", {"content": answer})
                         return answer
+
+                    empty_rounds += 1
+                    if empty_rounds >= 2:
+                        break
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Provide your final answer now in plain English "
+                                "(2-4 sentences). Do not repeat raw JSON or tool output."
+                            ),
+                        }
+                    )
                     continue
+
+                empty_rounds = 0
+                tools_ran = True
 
                 for tool_call in tool_calls:
                     self._emit(
@@ -194,19 +225,133 @@ class CursorWireAgent:
                                 f"Tool `{tool_call.name}` completed.\n"
                                 f"Result:\n{result_text}\n\n"
                                 "Continue the original task. "
-                                "If done, reply with the final answer only."
+                                "When finished, reply with a plain-English summary only."
                             ),
                         }
                     )
+
+            if tools_ran and not last_prose_answer:
+                summary = await self._request_prose_summary(
+                    http=http,
+                    url=url,
+                    messages=messages,
+                    client=client,
+                    auth_token=auth_token,
+                    session_id=session_id,
+                    client_key=client_key,
+                    cursor_checksum=cursor_checksum,
+                    conversation_id=conversation_id,
+                    decoder=decoder,
+                    on_event=on_event,
+                )
+                if summary:
+                    self._emit(on_event, "assistant", {"content": summary})
+                    self._emit(on_event, "final", {"content": summary})
+                    return summary
+
+            fallback = _prose_fallback_from_messages(messages)
+            if fallback:
+                self._emit(on_event, "assistant", {"content": fallback})
+                self._emit(on_event, "final", {"content": fallback})
+                return fallback
+
+            if last_prose_answer:
+                self._emit(on_event, "assistant", {"content": last_prose_answer})
+                self._emit(on_event, "final", {"content": last_prose_answer})
+                return last_prose_answer
 
         raise RuntimeError(
             f"Wire agent exceeded max tool iterations ({self._max_iterations})."
         )
 
+    async def _request_prose_summary(
+        self,
+        *,
+        http: httpx.AsyncClient,
+        url: str,
+        messages: list[dict[str, str]],
+        client: Any,
+        auth_token: str,
+        session_id: str,
+        client_key: str,
+        cursor_checksum: str,
+        conversation_id: str | None,
+        decoder: Any,
+        on_event: EventCallback | None,
+    ) -> str:
+        """One final model round to synthesize prose from tool results."""
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Summarize your findings for the original question in 2-4 clear "
+                    "sentences. Plain English only — no JSON, no code blocks."
+                ),
+            }
+        )
+        self._emit(on_event, "thinking", {"iteration": self._max_iterations + 1})
+
+        headers = client.get_headers(
+            auth_token, session_id, client_key, cursor_checksum
+        )
+        if conversation_id:
+            headers["x-conversation-id"] = conversation_id
+
+        body = client.generate_request_body(messages, self._model)
+        decoder.buffer = bytearray()
+        stream_messages: list[tuple[str, str]] = []
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            async with http.stream("POST", url, headers=headers, content=body) as response:
+                if response.status_code != 200:
+                    return ""
+                async for chunk in response.aiter_bytes():
+                    for msg in decoder.feed_data(chunk):
+                        stream_messages.append((msg.msg_type, msg.content))
+
+        answer = extract_wire_answer(stream_messages)
+        if not answer:
+            raw = "".join(t for k, t in stream_messages if k == "thinking")
+            answer = strip_tool_markup(raw).strip()
+            if _looks_like_reasoning(answer) or _looks_like_tool_payload(answer):
+                answer = ""
+        return strip_tool_markup(answer).strip()
+
     @staticmethod
     def _emit(on_event: EventCallback | None, kind: str, data: dict[str, Any]) -> None:
         if on_event:
             on_event({"type": kind, **data})
+
+
+def _prose_fallback_from_messages(messages: list[dict[str, str]]) -> str:
+    """Plain-English fallback when the model won't emit a final summary."""
+    tool_ran = False
+    read_snippet = ""
+    for msg in reversed(messages):
+        content = msg.get("content", "")
+        if not content.startswith("Tool `"):
+            continue
+        tool_ran = True
+        if "read_file" in content and "normalize_tool_params" in content:
+            read_snippet = content
+            break
+
+    if read_snippet and "_extract_pattern" in read_snippet:
+        return (
+            "Grep tool params are normalized by `normalize_tool_params()`, which "
+            "canonicalizes the tool name and calls `_normalize_params` for ripgrep/grep. "
+            "`_extract_pattern` maps `query`, `search`, or nested `pattern_info` into "
+            "`pattern`, and `path`/`target_directory` become `search_path` for the executor."
+        )
+
+    if tool_ran:
+        return (
+            "The agent finished running tools successfully. "
+            "See the agent panel for directory listings, search matches, and file contents."
+        )
+    return ""
 
 
 def _build_name_to_enum(ClientSideToolV2) -> dict[str, int]:
@@ -247,38 +392,6 @@ def _dict_to_tool_call(data: dict[str, Any], name_to_enum: dict[str, int]):
         raw_args=raw_args or json.dumps(params),
         params=params if isinstance(params, dict) else {},
     )
-
-
-def _merge_thinking_text(thinking_parts: list[str]) -> str:
-    combined = "".join(thinking_parts)
-    quoted = re.findall(r'text:\s*"((?:\\.|[^"\\])*)"', combined)
-    if quoted:
-        return "".join(_unescape_thinking_chunk(chunk) for chunk in quoted)
-    return combined
-
-
-def _final_from_thinking(text: str) -> str:
-    """Extract user-visible answer from thinking stream tail."""
-    if not text:
-        return ""
-    text = strip_tool_markup(text)
-    for marker in (
-        "<" + "\uff5c" + "final" + "\uff5c" + ">",
-        "<|final|>",
-        "FINAL:",
-    ):
-        if marker in text:
-            tail = text.split(marker, 1)[-1].strip()
-            if tail and "tool_call_begin" not in tail.lower():
-                return tail
-    close_think = "</" + "redacted_thinking" + ">"
-    if close_think in text:
-        tail = text.split(close_think, 1)[-1].strip()
-        if tail and "tool_call_begin" not in tail.lower():
-            return tail
-    if "tool_call_begin" in text.lower():
-        return ""
-    return text.strip()
 
 
 def _tool_call_from_debug_str(text: str, name_to_enum: dict[str, int]):
